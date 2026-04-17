@@ -1,0 +1,9 @@
+node_modules/
+coverage/
+npm-debug.log
+.env
+*.log
+sbom-cyclonedx.json
+trivy-*.json
+grype-*.json
+gitleaks-report.json

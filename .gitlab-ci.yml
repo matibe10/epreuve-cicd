@@ -1,0 +1,144 @@
+stages:
+  - build
+  - test
+  - security
+  - package
+  - deploy
+
+variables:
+  IMAGE_NAME: "$CI_REGISTRY_IMAGE/taskapi"
+  IMAGE_TAG: "$CI_COMMIT_SHA"
+  DOCKER_TLS_CERTDIR: "/certs"
+  TRIVY_CACHE_DIR: ".trivycache"
+
+cache:
+  key:
+    files:
+      - src/package.json
+  paths:
+    - src/node_modules/
+    - .npm/
+    - .trivycache/
+
+build:
+  stage: build
+  image: node:20-alpine
+  script:
+    - cd src
+    - npm ci --cache ../.npm --prefer-offline || npm install --cache ../.npm
+  artifacts:
+    paths:
+      - src/node_modules/
+    expire_in: 1 hour
+
+test:
+  stage: test
+  image: node:20-alpine
+  needs:
+    - build
+  script:
+    - cd src
+    - npm test -- --ci --coverageReporters=cobertura --coverageReporters=text
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    when: always
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: src/coverage/cobertura-coverage.xml
+    paths:
+      - src/coverage/
+    expire_in: 1 week
+
+sast:
+  stage: security
+  image: semgrep/semgrep:latest
+  script:
+    - semgrep ci --json --output semgrep-report.json
+  artifacts:
+    when: always
+    paths:
+      - semgrep-report.json
+    expire_in: 1 week
+
+sca:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format json --output trivy-fs-report.json .
+  artifacts:
+    when: always
+    paths:
+      - trivy-fs-report.json
+    expire_in: 1 week
+
+grype_sca:
+  stage: security
+  image:
+    name: anchore/grype:latest
+    entrypoint: [""]
+  script:
+    - grype dir:. --fail-on critical -o json --file grype-fs-report.json
+  artifacts:
+    when: always
+    paths:
+      - grype-fs-report.json
+    expire_in: 1 week
+
+secret_detection:
+  stage: security
+  image:
+    name: zricethezav/gitleaks:latest
+    entrypoint: [""]
+  script:
+    - gitleaks detect --source . --report-format json --report-path gitleaks-report.json --redact --exit-code 1
+  artifacts:
+    when: always
+    paths:
+      - gitleaks-report.json
+    expire_in: 1 week
+
+package:
+  stage: package
+  image: docker:25
+  services:
+    - docker:25-dind
+  needs:
+    - test
+    - sast
+    - sca
+    - grype_sca
+    - secret_detection
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+  script:
+    - docker build --pull -t "$IMAGE_NAME:$IMAGE_TAG" -t "$IMAGE_NAME:latest" .
+    - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/work" aquasec/trivy:latest image --severity HIGH,CRITICAL --exit-code 1 --format json --output /work/trivy-image-report.json "$IMAGE_NAME:$IMAGE_TAG"
+    - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/work" anchore/grype:latest "$IMAGE_NAME:$IMAGE_TAG" --fail-on critical -o json --file /work/grype-image-report.json
+    - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/work" anchore/syft:latest "$IMAGE_NAME:$IMAGE_TAG" -o cyclonedx-json=/work/sbom-cyclonedx.json
+    - docker push "$IMAGE_NAME:$IMAGE_TAG"
+    - docker push "$IMAGE_NAME:latest"
+    - docker save "$IMAGE_NAME:$IMAGE_TAG" -o taskapi-image.tar
+  artifacts:
+    when: always
+    paths:
+      - taskapi-image.tar
+      - trivy-image-report.json
+      - grype-image-report.json
+      - sbom-cyclonedx.json
+    expire_in: 1 day
+
+deploy:
+  stage: deploy
+  image:
+    name: bitnami/kubectl:latest
+    entrypoint: [""]
+  needs:
+    - package
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  script:
+    - kubectl set image deployment/taskapi taskapi="$IMAGE_NAME:$IMAGE_TAG" --record
+    - kubectl rollout status deployment/taskapi --timeout=120s
