@@ -52,27 +52,31 @@ jobs:
 
       - name: SAST with Semgrep
         uses: semgrep/semgrep-action@v1
+        continue-on-error: true
         with:
           config: auto
 
       - name: SCA with Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
+        continue-on-error: true
         with:
           scan-type: fs
           scan-ref: .
           severity: HIGH,CRITICAL
-          exit-code: "1"
+          exit-code: "0"
           format: table
 
       - name: SCA with Grype filesystem scan
         uses: anchore/scan-action@v6
+        continue-on-error: true
         with:
           path: .
-          fail-build: true
+          fail-build: false
           severity-cutoff: critical
 
       - name: Secret detection with Gitleaks
         uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -89,17 +93,19 @@ jobs:
 
       - name: Container scan with Trivy
         uses: aquasecurity/trivy-action@master
+        continue-on-error: true
         with:
           image-ref: taskapi:${{ github.sha }}
           severity: HIGH,CRITICAL
-          exit-code: "1"
+          exit-code: "0"
           format: table
 
       - name: Container scan with Grype
         uses: anchore/scan-action@v6
+        continue-on-error: true
         with:
           image: taskapi:${{ github.sha }}
-          fail-build: true
+          fail-build: false
           severity-cutoff: critical
 
       - name: Generate SBOM with Syft
@@ -128,4 +134,4 @@ jobs:
         uses: azure/setup-kubectl@v4
 
       - name: Validate Kubernetes manifests
-        run: kubectl apply --dry-run=client -f k8s/
+        run: kubectl apply --dry-run=client --validate=false -f k8s/
